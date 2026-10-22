@@ -159,6 +159,8 @@ export function useComposerDraft({
   const ref = useRef<HTMLDivElement>(null);
   const placeholderContextRef = useRef(`${variant}:${activeSessionId ?? HOME_DRAFT_KEY}`);
   const draftKeyRef = useRef(draftKey);
+  const activeSessionIdRef = useRef(activeSessionId);
+  activeSessionIdRef.current = activeSessionId;
   const workspacePathRef = useRef(workspacePath);
   workspacePathRef.current = workspacePath;
   const previousWorkspacePathRef = useRef(initialDraft?.workspacePath ?? workspacePath);
@@ -177,6 +179,18 @@ export function useComposerDraft({
   fileReferencesRef.current = fileReferences;
 
   // Expose React-compatible setters while recording only real content changes.
+  // New Task reads this synchronously, before React commits anything, so the
+  // mirror is written on the keystroke itself rather than from an effect.
+  const syncLiveDraft = (text: string, references: readonly ComposerFileReference[]) => {
+    useAppStore
+      .getState()
+      .reportComposerDraft(
+        activeSessionIdRef.current ?? null,
+        text.trim() || references.length > 0
+          ? { text, fileReferences: references.map(draftFileReference) }
+          : null,
+      );
+  };
   const setDraftValue: Dispatch<SetStateAction<string>> = (action) => {
     const current = valueRef.current;
     const next = typeof action === "function" ? action(current) : action;
@@ -184,6 +198,7 @@ export function useComposerDraft({
       markComposerDraftEdited(draftKeyRef.current);
       valueRef.current = next;
     }
+    syncLiveDraft(next, fileReferencesRef.current);
     setValue(next);
   };
   const setDraftFileReferences: Dispatch<SetStateAction<ComposerFileReference[]>> = (action) => {
@@ -354,6 +369,7 @@ export function useComposerDraft({
       pendingEditorCaretRef.current = caret;
     }
     valueRef.current = nextValue;
+    syncLiveDraft(nextValue, fileReferencesRef.current);
     setValue(nextValue);
     reconcileEditorReferences(nextValue);
     updateCursor(caret);
@@ -432,19 +448,6 @@ export function useComposerDraft({
       workspacePath,
     );
   }, [draftKey, fileReferences, referenceSessionId, workspacePath]);
-
-  // New Task may move this chat's content to another chat before the key
-  // change below flushes it, so the store always sees the live value.
-  useEffect(() => {
-    useAppStore
-      .getState()
-      .reportComposerDraft(
-        activeSessionId ?? null,
-        value.trim() || fileReferences.length > 0
-          ? { text: value, fileReferences: fileReferences.map(draftFileReference) }
-          : null,
-      );
-  }, [activeSessionId, fileReferences, value]);
 
   useEffect(() => {
     pruneComposerDrafts([

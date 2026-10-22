@@ -338,7 +338,6 @@ export function createSessionCoordination({
     const sessionId = created.session.id;
     runtime.handOverComposerDraftForCreatedSession(
       sessionId,
-      state,
       options.parkedDraft ?? null,
     );
     if (!runtime.navigationIntentIsCurrent(active)) {

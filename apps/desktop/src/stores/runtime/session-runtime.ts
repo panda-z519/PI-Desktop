@@ -85,10 +85,11 @@ export type SessionRuntime = {
   ) => void;
   /** Content parked in this scope's empty chat that a New Task may claim. */
   parkedDraftForNewSession: (state: AppState) => ParkedDraft | null;
-  /** A created session takes over the content of the chat it replaces. */
+  /** Remember the chat on screen's unsent content before New Task leaves it. */
+  rememberLeavingDraft: (state: AppState) => string | null;
+  /** A created session takes over the content parked in this scope. */
   handOverComposerDraftForCreatedSession: (
     createdSessionId: string,
-    state: AppState,
     parked: ParkedDraft | null,
   ) => void;
   /** Mirror the mounted Composer's committed value into the renderer. */
@@ -486,40 +487,40 @@ export function createSessionRuntime({ get, set }: StoreAccess): SessionRuntime 
   }
 
   /**
-   * New Task is leaving a chat: its unsent content moves to the chat replacing
-   * it, and the content already in the chat being left — the one still on
-   * screen — is parked for the next New Task.
+   * Remember the unsent content of the chat on screen before New Task leaves
+   * it. A row that still looks empty must be able to hand its draft back, and
+   * the chat being left is the one the user actually sees.
    */
-  function parkComposerDraftForNewTask(targetSessionId: string | null, state: AppState): void {
-    const leaving = state.retainedSessionIds[0] ?? state.activeSessionId ?? null;
-    const target = targetSessionId ?? null;
-    if (!leaving) return;
+  function rememberLeavingDraft(state: AppState): string | null {
+    const leaving = state.retainedSessionIds[0] ?? state.activeSessionId;
+    if (!leaving) return null;
     const content = composerDraftForSession(leaving, state);
-    if (!content) return;
-    if (target && target !== leaving) writeComposerDraft(target, content);
-    if (target === leaving) return;
+    if (!content) return null;
     writeComposerDraft(leaving, content);
     Object.assign(draftParking, rememberParkedDraft(draftParking, leaving));
+    return leaving;
   }
 
   /**
-   * The chat a created session replaces takes over its content, and the chat on
-   * screen is parked for the next New Task.
+   * New Task reuses an empty chat: the content of the chat it leaves moves to
+   * that destination instead of being left behind.
    */
+  function parkComposerDraftForNewTask(targetSessionId: string | null, state: AppState): void {
+    const target = targetSessionId ?? null;
+    const leaving = state.retainedSessionIds[0] ?? state.activeSessionId;
+    if (!target || !leaving || leaving === target) return;
+    const content = composerDraftForSession(leaving, state);
+    if (content) writeComposerDraft(target, content);
+  }
+
+  /** A created session takes over the content parked in this scope. */
   function handOverComposerDraftForCreatedSession(
     createdSessionId: string,
-    state: AppState,
     parked: ParkedDraft | null,
   ): void {
-    const leaving = state.retainedSessionIds[0] ?? state.activeSessionId ?? null;
-    if (parked && parked.sessionId !== leaving) {
-      writeComposerDraft(createdSessionId, parked.draft);
-      Object.assign(draftParking, claimParkedDraft(draftParking, parked.sessionId, null));
-    }
-    const content = leaving ? composerDraftForSession(leaving, state) : undefined;
-    if (!leaving || !content) return;
-    writeComposerDraft(leaving, content);
-    Object.assign(draftParking, rememberParkedDraft(draftParking, leaving));
+    if (!parked) return;
+    writeComposerDraft(createdSessionId, parked.draft);
+    Object.assign(draftParking, claimParkedDraft(draftParking, parked.sessionId, null));
   }
 
   return {
@@ -535,6 +536,7 @@ export function createSessionRuntime({ get, set }: StoreAccess): SessionRuntime 
     draftParking,
     parkComposerDraftForNewTask,
     parkedDraftForNewSession,
+    rememberLeavingDraft,
     handOverComposerDraftForCreatedSession,
     rememberLiveComposerDraft,
     navigationIntentIsCurrent: (intent) => navigationIntents.isCurrent(intent),

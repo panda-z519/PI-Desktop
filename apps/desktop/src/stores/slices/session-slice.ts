@@ -681,6 +681,10 @@ export function createSessionSlice({
         }
 
         const state = get();
+        // Whatever the branch below does, the chat on screen is being left:
+        // its unsent content is remembered so the next New Task can bring it
+        // back instead of leaving it in a row that looks empty.
+        runtime.rememberLeavingDraft(state);
         const latest = runtime.latestSessionInScope(
           state.sessions,
           requestedProjectPath,

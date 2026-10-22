@@ -25,6 +25,7 @@ import {
 import {
   retainSessionPane,
 } from "../../lib/session-panes";
+import type { ParkedDraft } from "../../lib/session-draft-parking";
 import {
   projectPathsForNewSessions,
   sessionMatchesProject,
@@ -91,6 +92,10 @@ export type SessionSliceDependencies = StoreAccess & {
     intent: number;
     projectPath?: string | null;
     draftConfiguration?: DraftSessionConfiguration | null;
+    /** Run the new session in its own git worktree (ADR 0329). */
+    isolated?: boolean;
+    /** Unsent content New Task parked in this scope for the session it creates. */
+    parkedDraft?: ParkedDraft | null;
   }) => Promise<string | null>;
 };
 
@@ -675,30 +680,40 @@ export function createSessionSlice({
           if (!runtime.navigationIntentIsCurrent(intent)) return;
         }
 
+        const state = get();
         const latest = runtime.latestSessionInScope(
-          get().sessions,
+          state.sessions,
           requestedProjectPath,
-          get().sessionMeta,
+          state.sessionMeta,
         );
         if (
           latest &&
           sessionIsReusableEmpty(latest, {
             isolated,
-            running: get().runningSessions[latest.id] === true,
-            liveMessageCount: runtime.liveMessageCountForSession(latest.id, get()),
+            running: state.runningSessions[latest.id] === true,
+            liveMessageCount: runtime.liveMessageCountForSession(latest.id, state),
             submitted: runtime.submittedComposerDrafts.has(latest.id),
           })
         ) {
-          if (get().activeSessionId === latest.id && get().page === "chat") return;
-          await get().selectSession(latest.id, { navigationIntent: intent });
+          // New Task lands on an empty chat either way, so the content of the
+          // chat it leaves moves there and the content that chat already holds
+          // is parked for the next New Task.
+          const destination = latest.id;
+          runtime.parkComposerDraftForNewTask(destination, state);
+          if (state.activeSessionId === destination && state.page === "chat") return;
+          await get().selectSession(destination, { navigationIntent: intent });
           return;
         }
 
+        // No empty chat to reuse: the content parked in this scope belongs to
+        // the session being created, so it is not stranded in a row that still
+        // looks empty.
         await persistSessionAndSelect({
           intent,
           projectPath: requestedProjectPath,
           draftConfiguration: null,
           ...(isolated ? { isolated: true } : {}),
+          parkedDraft: runtime.parkedDraftForNewSession(state),
         });
       })();
       runtime.pendingNewSessionRequests.set(scopeKey, request);

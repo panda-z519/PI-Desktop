@@ -454,6 +454,8 @@ export const useAppStore = create<AppState>((set, get) => {
 
 
   clearComposerPrefill: () => set({ composerPrefill: null }),
+  reportComposerDraft: (sessionId, draft) =>
+    sessionRuntime.rememberLiveComposerDraft(sessionId, draft),
   };
 });
 

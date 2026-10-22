@@ -398,7 +398,16 @@ export function useComposerDraft({
     const previousKey = draftKeyRef.current;
     if (previousKey !== draftKey) {
       invalidateComposerTransforms();
-      persistDraft(previousKey);
+      const leaving = snapshotComposerDraft(
+        readLiveDraft(),
+        fileReferencesRef.current,
+        previousKey,
+        workspacePathRef.current,
+      );
+      // A New Task that took this content to another chat already rewrote this
+      // slot, so a stale editor copy must not be written back over it.
+      const projected = readComposerDraft(previousKey);
+      if (projected && sameDraftContent(projected, leaving)) persistDraft(previousKey);
       if (previousKey === HOME_DRAFT_KEY) flushScheduledHomeDraftAdopt(draftKey);
       draftKeyRef.current = draftKey;
       const nextDraft = readComposerDraft(draftKey);
@@ -423,6 +432,19 @@ export function useComposerDraft({
       workspacePath,
     );
   }, [draftKey, fileReferences, referenceSessionId, workspacePath]);
+
+  // New Task may move this chat's content to another chat before the key
+  // change below flushes it, so the store always sees the live value.
+  useEffect(() => {
+    useAppStore
+      .getState()
+      .reportComposerDraft(
+        activeSessionId ?? null,
+        value.trim() || fileReferences.length > 0
+          ? { text: value, fileReferences: fileReferences.map(draftFileReference) }
+          : null,
+      );
+  }, [activeSessionId, fileReferences, value]);
 
   useEffect(() => {
     pruneComposerDrafts([
@@ -755,5 +777,19 @@ function createFileReferenceFromSnapshot(
     fileReference.name,
     sessionId,
     fileReference,
+  );
+}
+
+/** Whether a cached slot already holds exactly this draft's content. */
+function sameDraftContent(
+  cached: ComposerDraftSnapshot,
+  leaving: ComposerDraftSnapshot,
+): boolean {
+  return (
+    cached.text === leaving.text &&
+    cached.fileReferences.length === leaving.fileReferences.length &&
+    cached.fileReferences.every((reference, index) =>
+      sameDraftFileReference(reference, leaving.fileReferences[index]),
+    )
   );
 }

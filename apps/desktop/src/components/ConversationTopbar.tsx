@@ -169,6 +169,7 @@ export function ConversationTopbar({
             className="ct-icon-btn"
             tooltip={newTaskTooltip}
             ariaLabel={t("nav.newTask")}
+            data-nav="new-task"
             onClick={onNewTask}
           >
             <IconNewSession size={15} />

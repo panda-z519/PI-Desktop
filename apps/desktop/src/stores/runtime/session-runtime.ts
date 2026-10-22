@@ -25,6 +25,16 @@ import {
 import type { ComposerDraftSnapshot } from "../../lib/composer-smart-stop";
 import { formatToolValue } from "../../lib/tool-display";
 import { recordPaneTranscript } from "../../lib/session-panes";
+import {
+  claimParkedDraft,
+  createSessionDraftParking,
+  parkedDraftHasContent,
+  rememberParkedDraft,
+  type ParkedDraft,
+  type SessionDraftParking,
+} from "../../lib/session-draft-parking";
+import { readComposerDraft, writeComposerDraft } from "../../lib/composer-draft-cache";
+import { sessionIsReusableEmpty } from "../../lib/session-create";
 import type { AppState, SessionHistoryWindow } from "../app-state";
 import type { StoreAccess } from "../slices/types";
 
@@ -38,6 +48,14 @@ export type SubmittedComposerDraft = {
   abortResolution?: Promise<boolean>;
   resolveAbort?: (restored: boolean) => void;
 };
+
+/**
+ * What the mounted Composer currently holds.
+ *
+ * The Composer keeps its value in React state and only serializes on a key
+ * change, so New Task asks `useComposerDraft` to keep this mirror current.
+ */
+let composeLiveComposerDraft: ({ sessionId: string | null } & ComposerDraftSnapshot) | null = null;
 
 export type SessionConfiguration = Pick<
   SessionSummary,
@@ -56,6 +74,28 @@ export type SessionRuntime = {
   readonly pendingSessionConfigurations: Map<string, SessionConfiguration>;
   readonly sessionConfigurationFlushes: Map<string, Promise<void>>;
   beginNavigationIntent: () => number;
+  readonly draftParking: SessionDraftParking;
+  /**
+   * New Task is leaving a chat: its unsent content moves to the chat replacing
+   * it, and what it leaves behind is parked for the next New Task.
+   */
+  parkComposerDraftForNewTask: (
+    targetSessionId: string | null,
+    state: AppState,
+  ) => void;
+  /** Content parked in this scope's empty chat that a New Task may claim. */
+  parkedDraftForNewSession: (state: AppState) => ParkedDraft | null;
+  /** A created session takes over the content of the chat it replaces. */
+  handOverComposerDraftForCreatedSession: (
+    createdSessionId: string,
+    state: AppState,
+    parked: ParkedDraft | null,
+  ) => void;
+  /** Mirror the mounted Composer's committed value into the renderer. */
+  rememberLiveComposerDraft: (
+    sessionId: string | null,
+    draft: ComposerDraftSnapshot | null,
+  ) => void;
   navigationIntentIsCurrent: (intent: number) => boolean;
   newSessionScopeKey: (projectPath?: string | null) => string;
   latestSessionInScope: (
@@ -122,6 +162,7 @@ export type SessionRuntime = {
 type ToolStart = NonNullable<ReturnType<SessionRuntime["getToolStart"]>>;
 
 export function createSessionRuntime({ get, set }: StoreAccess): SessionRuntime {
+  const draftParking: SessionDraftParking = createSessionDraftParking();
   const navigationIntents = createNavigationIntentController();
   let pendingSessionSelection: SessionSelection | null = null;
   let sessionWorkspaceQueue: Promise<unknown> = Promise.resolve();
@@ -390,6 +431,96 @@ export function createSessionRuntime({ get, set }: StoreAccess): SessionRuntime 
     }
     toolStartsByCallId.set(toolCallId, value);
   }
+  /**
+   * Unsent composer content one chat still holds.
+   *
+   * The Composer keeps its value in React state until a key change or unmount
+   * flushes it into the draft cache, so this renderer's mirror of the visible
+   * editor wins while it still has the same chat, then the cache each visit
+   * writes into.
+   */
+  function composerDraftForSession(
+    sessionId: string,
+    state: Pick<AppState, "activeSessionId">,
+  ): ComposerDraftSnapshot | undefined {
+    const live = composeLiveComposerDraft;
+    if (live && live.sessionId === sessionId && state.activeSessionId === sessionId) {
+      return { text: live.text, fileReferences: [...live.fileReferences] };
+    }
+    const cached = readComposerDraft(sessionId);
+    if (!cached) return undefined;
+    return { text: cached.text, fileReferences: cached.fileReferences };
+  }
+
+  /** Mirror what the mounted Composer holds; `null` once its chat is gone. */
+  function rememberLiveComposerDraft(
+    sessionId: string | null,
+    draft: ComposerDraftSnapshot | null,
+  ): void {
+    composeLiveComposerDraft = draft ? { sessionId, ...draft } : null;
+  }
+
+  /** Content parked in this scope's empty chat that New Task may claim. */
+  function parkedDraftForNewSession(state: AppState): ParkedDraft | null {
+    for (const sessionId of draftParking.pending) {
+      const session = state.sessions.find((candidate) => candidate.id === sessionId);
+      if (!session) continue;
+      if (
+        !sessionIsReusableEmpty(session, {
+          running: state.runningSessions[sessionId] === true,
+          liveMessageCount:
+            state.activeSessionId === sessionId
+              ? state.messages.length
+              : sessionTranscriptCache.get(sessionId)?.length ??
+                state.retainedTranscripts[sessionId]?.length ??
+                0,
+          submitted: submittedComposerDrafts.has(sessionId),
+        })
+      ) {
+        continue;
+      }
+      const draft = composerDraftForSession(sessionId, state);
+      if (draft) return { sessionId, draft };
+    }
+    return null;
+  }
+
+  /**
+   * New Task is leaving a chat: its unsent content moves to the chat replacing
+   * it, and the content already in the chat being left — the one still on
+   * screen — is parked for the next New Task.
+   */
+  function parkComposerDraftForNewTask(targetSessionId: string | null, state: AppState): void {
+    const leaving = state.retainedSessionIds[0] ?? state.activeSessionId ?? null;
+    const target = targetSessionId ?? null;
+    if (!leaving) return;
+    const content = composerDraftForSession(leaving, state);
+    if (!content) return;
+    if (target && target !== leaving) writeComposerDraft(target, content);
+    if (target === leaving) return;
+    writeComposerDraft(leaving, content);
+    Object.assign(draftParking, rememberParkedDraft(draftParking, leaving));
+  }
+
+  /**
+   * The chat a created session replaces takes over its content, and the chat on
+   * screen is parked for the next New Task.
+   */
+  function handOverComposerDraftForCreatedSession(
+    createdSessionId: string,
+    state: AppState,
+    parked: ParkedDraft | null,
+  ): void {
+    const leaving = state.retainedSessionIds[0] ?? state.activeSessionId ?? null;
+    if (parked && parked.sessionId !== leaving) {
+      writeComposerDraft(createdSessionId, parked.draft);
+      Object.assign(draftParking, claimParkedDraft(draftParking, parked.sessionId, null));
+    }
+    const content = leaving ? composerDraftForSession(leaving, state) : undefined;
+    if (!leaving || !content) return;
+    writeComposerDraft(leaving, content);
+    Object.assign(draftParking, rememberParkedDraft(draftParking, leaving));
+  }
 
   return {
     pendingNewSessionRequests,
@@ -401,6 +532,11 @@ export function createSessionRuntime({ get, set }: StoreAccess): SessionRuntime 
     pendingSessionConfigurations,
     sessionConfigurationFlushes,
     beginNavigationIntent: () => navigationIntents.begin(),
+    draftParking,
+    parkComposerDraftForNewTask,
+    parkedDraftForNewSession,
+    handOverComposerDraftForCreatedSession,
+    rememberLiveComposerDraft,
     navigationIntentIsCurrent: (intent) => navigationIntents.isCurrent(intent),
     newSessionScopeKey: (projectPath) =>
       normalizeProjectPath(projectPath) ?? "<temporary>",

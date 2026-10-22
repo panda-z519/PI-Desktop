@@ -382,6 +382,11 @@ export type AppState = {
   dismissToast: (id: number) => void;
   composerPrefill: ComposerPrefill | null;
   clearComposerPrefill: () => void;
+  /**
+   * Mirror the mounted composer's unsent content so New Task can hand it to
+   * the chat it opens; `null` once the composer has none.
+   */
+  reportComposerDraft: (sessionId: string | null, draft: ComposerDraftSnapshot | null) => void;
   workPanelOpen: boolean;
   workPanelTabs: WorkPanelTab[];
   activeWorkPanelTabId: string | null;

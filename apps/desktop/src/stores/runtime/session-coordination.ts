@@ -19,6 +19,7 @@ import {
   FORKED_SESSION_WINDOW,
 } from "../../lib/session-fork";
 import { EMPTY_SESSION_WINDOW } from "../../lib/session-create";
+import type { ParkedDraft } from "../../lib/session-draft-parking";
 import { inheritedSessionModelBinding } from "../../lib/session-model";
 import {
   clearSessionPanes,
@@ -39,6 +40,8 @@ export type PersistSessionOptions = {
   draftConfiguration?: DraftSessionConfiguration | null;
   /** Run the new session in its own git worktree (ADR 0329). */
   isolated?: boolean;
+  /** Unsent content New Task parked in this scope for the session it creates. */
+  parkedDraft?: ParkedDraft | null;
 };
 
 export type SessionCoordination = {
@@ -333,6 +336,11 @@ export function createSessionCoordination({
       throw error;
     }
     const sessionId = created.session.id;
+    runtime.handOverComposerDraftForCreatedSession(
+      sessionId,
+      state,
+      options.parkedDraft ?? null,
+    );
     if (!runtime.navigationIntentIsCurrent(active)) {
       commitCreatedEmptySession(created.session, { activate: false });
       return null;
